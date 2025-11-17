@@ -1,0 +1,14 @@
+# Dependências do Aplicativo Utilitário de Suporte Técnico
+
+# Biblioteca WMI para Windows (opcional, mas recomendada para melhor compatibilidade)
+# Instale com: pip install wmi
+# Nota: wmi requer pywin32, que será instalado automaticamente
+
+# Alternativa mais leve (não requer instalação adicional):
+# O aplicativo funciona sem wmi usando comandos do sistema nativos do Windows
+
+# Para melhor compatibilidade, instale:
+wmi>=1.5.1; sys_platform == "win32"
+pywin32>=305; sys_platform == "win32"
+
+
