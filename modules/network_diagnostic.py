@@ -22,6 +22,9 @@ class NetworkDiagnosticModule:
         self.root_window = None
         self.auto_refresh = False
         self.refresh_thread = None
+        self.collect_thread = None
+        self.is_collecting = False
+        self.loading_label = None
     
     def get_display_name(self):
         """Retorna o nome de exibição do módulo"""
@@ -104,10 +107,32 @@ class NetworkDiagnosticModule:
         self.right_frame = right_frame
         self.switch_frame = switch_frame
         
-        # Carrega informações iniciais
-        self._refresh_network_info()
+        # Mostra indicador de carregamento
+        self._show_loading()
+        
+        # Carrega informações iniciais em thread separada
+        self._refresh_network_info_async()
         
         return frame
+    
+    def _show_loading(self):
+        """Mostra indicador de carregamento"""
+        # Limpa frames
+        for widget in self.left_frame.winfo_children():
+            widget.destroy()
+        for widget in self.right_frame.winfo_children():
+            widget.destroy()
+        for widget in self.switch_frame.winfo_children():
+            widget.destroy()
+        
+        # Mostra mensagem de carregamento
+        self.loading_label = ttk.Label(
+            self.left_frame,
+            text="Carregando informações de rede...",
+            font=("Segoe UI", 10),
+            foreground="blue"
+        )
+        self.loading_label.grid(row=0, column=0, pady=50)
     
     def _toggle_auto_refresh(self):
         """Ativa/desativa atualização automática"""
@@ -135,33 +160,89 @@ class NetworkDiagnosticModule:
         """Para atualização automática"""
         self.auto_refresh = False
     
+    def _refresh_network_info_async(self):
+        """Inicia coleta de informações de rede em thread separada"""
+        if self.is_collecting:
+            return
+        
+        self.is_collecting = True
+        
+        def collect_in_thread():
+            try:
+                # Coleta informações
+                network_info = self._collect_network_info()
+                
+                # Debug: verifica se coletou algo
+                adapters = network_info.get('adapters', [])
+                if not adapters:
+                    # Tenta método alternativo
+                    alt_info = self._collect_network_info_alternative()
+                    if alt_info.get('adapters'):
+                        network_info = alt_info
+                    else:
+                        # Se ainda não tem adaptadores, pelo menos mostra informações básicas
+                        if not network_info.get('hostname'):
+                            network_info['hostname'] = socket.gethostname()
+                        if not network_info.get('fqdn'):
+                            network_info['fqdn'] = socket.getfqdn()
+                
+                # Atualiza na thread principal
+                if self.root_window:
+                    self.network_info = network_info
+                    self.root_window.after(0, self._update_ui)
+                    
+            except Exception as e:
+                import traceback
+                error_msg = f"Erro ao coletar informações de rede: {str(e)}\n\n{traceback.format_exc()}"
+                if self.root_window:
+                    self.root_window.after(0, lambda: messagebox.showerror("Erro", error_msg))
+            finally:
+                self.is_collecting = False
+        
+        self.collect_thread = threading.Thread(target=collect_in_thread, daemon=True)
+        self.collect_thread.start()
+    
     def _refresh_network_info(self):
-        """Atualiza as informações de rede"""
-        try:
-            # Coleta informações
-            self.network_info = self._collect_network_info()
-            
-            # Debug: verifica se coletou algo
-            adapters = self.network_info.get('adapters', [])
-            if not adapters:
-                # Tenta método alternativo
-                alt_info = self._collect_network_info_alternative()
-                if alt_info.get('adapters'):
-                    self.network_info = alt_info
-                else:
-                    # Se ainda não tem adaptadores, pelo menos mostra informações básicas
-                    if not self.network_info.get('hostname'):
-                        self.network_info['hostname'] = socket.gethostname()
-                    if not self.network_info.get('fqdn'):
-                        self.network_info['fqdn'] = socket.getfqdn()
-            
-            # Atualiza interface
-            self._update_ui()
-            
-        except Exception as e:
-            import traceback
-            error_msg = f"Erro ao coletar informações de rede: {str(e)}\n\n{traceback.format_exc()}"
-            messagebox.showerror("Erro", error_msg)
+        """Atualiza as informações de rede (versão síncrona para auto-refresh)"""
+        if self.is_collecting:
+            return
+        
+        self.is_collecting = True
+        
+        def collect_in_thread():
+            try:
+                # Coleta informações
+                network_info = self._collect_network_info()
+                
+                # Debug: verifica se coletou algo
+                adapters = network_info.get('adapters', [])
+                if not adapters:
+                    # Tenta método alternativo
+                    alt_info = self._collect_network_info_alternative()
+                    if alt_info.get('adapters'):
+                        network_info = alt_info
+                    else:
+                        # Se ainda não tem adaptadores, pelo menos mostra informações básicas
+                        if not network_info.get('hostname'):
+                            network_info['hostname'] = socket.gethostname()
+                        if not network_info.get('fqdn'):
+                            network_info['fqdn'] = socket.getfqdn()
+                
+                # Atualiza na thread principal
+                if self.root_window:
+                    self.network_info = network_info
+                    self.root_window.after(0, self._update_ui)
+                    
+            except Exception as e:
+                import traceback
+                error_msg = f"Erro ao coletar informações de rede: {str(e)}\n\n{traceback.format_exc()}"
+                if self.root_window:
+                    self.root_window.after(0, lambda: messagebox.showerror("Erro", error_msg))
+            finally:
+                self.is_collecting = False
+        
+        thread = threading.Thread(target=collect_in_thread, daemon=True)
+        thread.start()
     
     def _collect_network_info(self):
         """Coleta todas as informações de rede"""
@@ -218,7 +299,7 @@ class NetworkDiagnosticModule:
                 ["netsh", "interface", "show", "interface"],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=5,
                 creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
             )
             
@@ -251,7 +332,7 @@ class NetworkDiagnosticModule:
                 ["ipconfig", "/all"],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=5,
                 creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
             )
             
@@ -439,7 +520,7 @@ class NetworkDiagnosticModule:
                 ["route", "print", "0.0.0.0"],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=3,
                 creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
             )
             
@@ -465,7 +546,7 @@ class NetworkDiagnosticModule:
                 ["ipconfig", "/all"],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=5,
                 creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
             )
             
@@ -587,7 +668,7 @@ class NetworkDiagnosticModule:
                         ["nbtstat", "-A", gateway],
                         capture_output=True,
                         text=True,
-                        timeout=5,
+                        timeout=3,
                         creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
                     )
                     if result.returncode == 0:
@@ -772,6 +853,11 @@ class NetworkDiagnosticModule:
     
     def _update_ui(self):
         """Atualiza a interface com as informações coletadas"""
+        # Remove indicador de carregamento se existir
+        if self.loading_label:
+            self.loading_label.destroy()
+            self.loading_label = None
+        
         # Limpa frames
         for widget in self.left_frame.winfo_children():
             widget.destroy()
@@ -1087,33 +1173,43 @@ class NetworkDiagnosticModule:
         )
         right_row += 1
         
-        # Teste de conectividade básico
-        connectivity_text = "Testando..."
-        try:
-            # Testa conectividade com gateway
-            if gateway and gateway != 'N/A':
-                result = subprocess.run(
-                    ["ping", "-n", "1", "-w", "1000", gateway],
-                    capture_output=True,
-                    timeout=3,
-                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-                )
-                if result.returncode == 0:
-                    connectivity_text = "Gateway acessível"
-                else:
-                    connectivity_text = "Gateway não acessível"
-            else:
-                connectivity_text = "Gateway não configurado"
-        except Exception:
-            connectivity_text = "Não testado"
-        
+        # Teste de conectividade básico (executado em thread separada para não travar)
         ttk.Label(self.right_frame, text="Conectividade:", font=("Segoe UI", 9)).grid(
             row=right_row, column=0, sticky=tk.W, pady=2
         )
-        ttk.Label(self.right_frame, text=connectivity_text, font=("Segoe UI", 9)).grid(
-            row=right_row, column=1, sticky=tk.W, padx=(10, 0), pady=2
-        )
+        connectivity_label = ttk.Label(self.right_frame, text="Testando...", font=("Segoe UI", 9))
+        connectivity_label.grid(row=right_row, column=1, sticky=tk.W, padx=(10, 0), pady=2)
         right_row += 1
+        
+        # Executa teste em thread separada
+        def test_and_update_connectivity():
+            try:
+                # Testa conectividade com gateway
+                if gateway and gateway != 'N/A':
+                    result = subprocess.run(
+                        ["ping", "-n", "1", "-w", "1000", gateway],
+                        capture_output=True,
+                        timeout=2,
+                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                    )
+                    if result.returncode == 0:
+                        result_text = "Gateway acessível"
+                    else:
+                        result_text = "Gateway não acessível"
+                else:
+                    result_text = "Gateway não configurado"
+            except Exception:
+                result_text = "Não testado"
+            
+            # Atualiza label na thread principal
+            if self.root_window:
+                # Usa uma função lambda com valor capturado corretamente
+                def update_label(text=result_text):
+                    connectivity_label.config(text=text)
+                self.root_window.after(0, update_label)
+        
+        # Inicia teste em background
+        threading.Thread(target=test_and_update_connectivity, daemon=True).start()
         
         # Status da interface (se disponível via WMI)
         if wmi_adapters and active_adapter:

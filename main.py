@@ -107,6 +107,13 @@ class SupportUtilityApp:
     
     def _load_module(self, module_name):
         """Carrega e exibe um módulo no frame de conteúdo"""
+        # Para threads de módulos anteriores (especialmente network_diagnostic)
+        for module in self.module_manager.get_modules().values():
+            if hasattr(module, '_stop_auto_refresh'):
+                module._stop_auto_refresh()
+            if hasattr(module, 'is_collecting'):
+                module.is_collecting = False
+        
         # Limpa o frame de conteúdo
         for widget in self.content_frame.winfo_children():
             widget.destroy()
