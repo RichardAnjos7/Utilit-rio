@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import sys
 import os
+import ctypes
 
 # Adiciona o diretório raiz ao path para importar módulos
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -15,6 +16,51 @@ from modules.service_tag import ServiceTagModule
 from modules.network_diagnostic import NetworkDiagnosticModule
 from modules.local_account_token_fix import LocalAccountTokenFixModule
 from utils.module_manager import ModuleManager
+
+
+def is_admin():
+    """Verifica se o processo está executando com privilégios de administrador"""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+
+def request_admin_elevation():
+    """Solicita elevação de privilégios e reinicia o aplicativo como administrador"""
+    if is_admin():
+        return True
+    
+    # Obtém o caminho do script atual
+    script_path = os.path.abspath(__file__)
+    python_exe = sys.executable
+    
+    # Usa ShellExecute para solicitar elevação
+    try:
+        # ShellExecuteW retorna um valor > 32 se bem-sucedido
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",  # Solicita elevação via UAC
+            python_exe,
+            f'"{script_path}"',
+            None,
+            1  # SW_SHOWNORMAL
+        )
+        
+        # Se result <= 32, houve erro
+        if result <= 32:
+            if result == 1223:  # ERROR_CANCELLED - usuário cancelou o UAC
+                print("Elevação de privilégios cancelada pelo usuário.")
+            else:
+                print(f"Erro ao solicitar elevação. Código: {result}")
+            return False
+        
+        # Se chegou aqui, a elevação foi solicitada com sucesso
+        # O processo atual deve ser encerrado
+        return True
+    except Exception as e:
+        print(f"Erro ao solicitar elevação: {e}")
+        return False
 
 
 class SupportUtilityApp:
@@ -136,6 +182,29 @@ class SupportUtilityApp:
 
 def main():
     """Função principal"""
+    # Verifica se está executando como administrador
+    if not is_admin():
+        # Solicita elevação de privilégios
+        if request_admin_elevation():
+            # Se a elevação foi solicitada, encerra o processo atual
+            # O novo processo elevado será iniciado
+            sys.exit(0)
+        else:
+            # Se o usuário cancelou ou houve erro, mostra mensagem e encerra
+            try:
+                root = tk.Tk()
+                root.withdraw()  # Esconde a janela principal
+                messagebox.showerror(
+                    "Privilégios de Administrador Necessários",
+                    "Este utilitário requer privilégios de administrador para funcionar corretamente.\n\n"
+                    "Por favor, execute como administrador ou aceite a solicitação de elevação (UAC)."
+                )
+                root.destroy()
+            except Exception:
+                print("Este utilitário requer privilégios de administrador.")
+            sys.exit(1)
+    
+    # Se chegou aqui, está executando como administrador
     root = tk.Tk()
     app = SupportUtilityApp(root)
     root.mainloop()
