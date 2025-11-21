@@ -109,3 +109,4 @@ Este projeto é um utilitário de código aberto para uso em suporte técnico.
 Para problemas ou sugestões, abra uma issue no repositório do projeto.
 
 
+

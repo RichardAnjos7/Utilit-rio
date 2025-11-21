@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from modules.service_tag import ServiceTagModule
 from modules.network_diagnostic import NetworkDiagnosticModule
+from modules.local_account_token_fix import LocalAccountTokenFixModule
 from utils.module_manager import ModuleManager
 
 
@@ -43,6 +44,7 @@ class SupportUtilityApp:
         """Registra todos os módulos disponíveis"""
         self.module_manager.register_module("service_tag", ServiceTagModule())
         self.module_manager.register_module("network_diagnostic", NetworkDiagnosticModule())
+        self.module_manager.register_module("local_account_token_fix", LocalAccountTokenFixModule())
     
     def _create_ui(self):
         """Cria a interface gráfica do aplicativo"""
