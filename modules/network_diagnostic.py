@@ -280,10 +280,21 @@ class NetworkDiagnosticModule:
             if dns_servers:
                 info['dns_servers'] = dns_servers
             
-            # Obtém informações do switch
-            switch_info = self._get_switch_info()
-            if switch_info:
-                info['switch_info'] = switch_info
+            # Armazena temporariamente o network_info para uso nos métodos de switch
+            # Isso permite que os métodos acessem o gateway recém-obtido
+            temp_network_info = self.network_info.copy() if hasattr(self, 'network_info') else {}
+            temp_network_info.update(info)
+            original_network_info = self.network_info
+            self.network_info = temp_network_info
+            
+            try:
+                # Obtém informações do switch (agora com acesso ao gateway)
+                switch_info = self._get_switch_info()
+                if switch_info:
+                    info['switch_info'] = switch_info
+            finally:
+                # Restaura o network_info original
+                self.network_info = original_network_info
             
         except Exception as e:
             print(f"Erro ao coletar informações: {e}")
@@ -578,16 +589,29 @@ class NetworkDiagnosticModule:
         }
         
         try:
-            # Tenta obter via LLDP (Link Layer Discovery Protocol)
-            lldp_info = self._get_lldp_info()
-            if lldp_info:
-                switch_info.update(lldp_info)
+            # Primeiro, tenta obter informações básicas do gateway (que geralmente é o switch)
+            gateway_info = self._get_switch_info_from_gateway()
+            if gateway_info:
+                switch_info.update(gateway_info)
             
-            # Tenta obter via SNMP (se disponível)
-            snmp_info = self._get_snmp_info()
-            if snmp_info:
-                # Atualiza apenas campos que não foram preenchidos
-                for key, value in snmp_info.items():
+            # Tenta obter via adaptadores ativos (port_id e VLAN)
+            adapter_port_info = self._get_port_info_from_adapters()
+            if adapter_port_info:
+                for key, value in adapter_port_info.items():
+                    if switch_info.get(key) == 'N/A' and value != 'N/A':
+                        switch_info[key] = value
+            
+            # Tenta obter VLAN via netsh interface (método alternativo)
+            vlan_info = self._get_vlan_info_from_netsh()
+            if vlan_info:
+                for key, value in vlan_info.items():
+                    if switch_info.get(key) == 'N/A' and value != 'N/A':
+                        switch_info[key] = value
+            
+            # Tenta obter via WMI (informações de porta) - mais confiável no Windows
+            wmi_port_info = self._get_wmi_port_info()
+            if wmi_port_info:
+                for key, value in wmi_port_info.items():
                     if switch_info.get(key) == 'N/A' and value != 'N/A':
                         switch_info[key] = value
             
@@ -598,12 +622,46 @@ class NetworkDiagnosticModule:
                     if switch_info.get(key) == 'N/A' and value != 'N/A':
                         switch_info[key] = value
             
-            # Tenta obter via WMI (informações de porta)
-            wmi_port_info = self._get_wmi_port_info()
-            if wmi_port_info:
-                for key, value in wmi_port_info.items():
+            # Tenta obter via LLDP (Link Layer Discovery Protocol) - PRIORIDADE ALTA
+            # LLDP geralmente tem as informações mais completas (porta, VLAN, modelo)
+            lldp_info = self._get_lldp_info()
+            if lldp_info:
+                for key, value in lldp_info.items():
                     if switch_info.get(key) == 'N/A' and value != 'N/A':
                         switch_info[key] = value
+                    # Se LLDP trouxe informações, prioriza elas
+                    elif value != 'N/A' and switch_info.get(key) != value:
+                        switch_info[key] = value
+            
+            # Tenta obter via SNMP (se disponível)
+            snmp_info = self._get_snmp_info()
+            if snmp_info:
+                # Atualiza apenas campos que não foram preenchidos
+                for key, value in snmp_info.items():
+                    if switch_info.get(key) == 'N/A' and value != 'N/A':
+                        switch_info[key] = value
+            
+            # Tenta obter via PowerShell Get-NetAdapterStatistics
+            ps_info = self._get_switch_info_from_powershell()
+            if ps_info:
+                for key, value in ps_info.items():
+                    if switch_info.get(key) == 'N/A' and value != 'N/A':
+                        switch_info[key] = value
+            
+            # Se não tem IP do switch mas tem gateway, usa o gateway como IP do switch
+            if switch_info.get('switch_ip') == 'N/A' or not switch_info.get('switch_ip'):
+                gateway = None
+                if hasattr(self, 'network_info') and self.network_info:
+                    gateway = self.network_info.get('default_gateway')
+                if gateway and gateway != 'N/A' and gateway:
+                    switch_info['switch_ip'] = gateway
+            
+            # Define status baseado nas informações coletadas
+            if switch_info.get('switch_ip') != 'N/A' or switch_info.get('switch_name') != 'N/A':
+                if switch_info.get('status') == 'N/A':
+                    switch_info['status'] = 'Conectado'
+            elif switch_info.get('status') == 'N/A':
+                switch_info['status'] = 'Desconectado'
             
         except Exception as e:
             print(f"Erro ao obter informações do switch: {e}")
@@ -611,36 +669,410 @@ class NetworkDiagnosticModule:
         return switch_info
     
     def _get_lldp_info(self):
-        """Obtém informações via LLDP/CDP"""
+        """Obtém informações via LLDP/CDP usando PowerShell Get-NetLldpNeighbor"""
         info = {}
         try:
-            # Tenta via PowerShell Get-NetAdapterStatistics ou netsh
-            # LLDP geralmente requer ferramentas específicas ou SNMP
-            # Por enquanto, retorna vazio - pode ser implementado com ferramentas externas
-            pass
-        except Exception:
-            pass
+            # Tenta obter via PowerShell Get-NetLldpNeighbor (método mais confiável no Windows)
+            ps_command = '''
+try {
+    $neighbors = Get-NetLldpNeighbor -ErrorAction SilentlyContinue
+    if ($neighbors) {
+        $neighbor = $neighbors | Select-Object -First 1
+        $result = @{
+            SwitchName = $neighbor.ChassisId
+            PortID = $neighbor.PortId
+            PortDescription = $neighbor.PortDescription
+            SystemName = $neighbor.SystemName
+            SystemDescription = $neighbor.SystemDescription
+            ManagementAddress = $neighbor.ManagementAddress
+        }
+        
+        # Tenta obter VLAN via TLVs
+        # VLAN geralmente vem em TLVs específicos
+        try {
+            $tlvs = Get-NetLldpNeighbor -ErrorAction SilentlyContinue | Select-Object -ExpandProperty TlvList -ErrorAction SilentlyContinue
+            if ($tlvs) {
+                foreach ($tlv in $tlvs) {
+                    # TLV Type 127 é VLAN ID (IEEE 802.1)
+                    if ($tlv.Type -eq 127 -or $tlv.Type -eq 8) {
+                        if ($tlv.Value) {
+                            $vlan = $tlv.Value
+                            if ($vlan -match '\d+') {
+                                $result.VlanID = $vlan
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+        } catch {}
+        
+        # Tenta obter todas as propriedades disponíveis
+        $props = $neighbor | Get-Member -MemberType Property | Select-Object -ExpandProperty Name
+        foreach ($prop in $props) {
+            $value = $neighbor.$prop
+            if ($value -and $prop -match 'Vlan|VLAN') {
+                $result.VlanID = $value
+            }
+        }
+        
+        $result | ConvertTo-Json -Compress
+    }
+} catch {
+    # Se Get-NetLldpNeighbor não estiver disponível, tenta netsh
+    try {
+        $output = netsh lldp show neighbors verbose 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $output | Out-String
+        }
+    } catch {}
+}
+'''
+            result = subprocess.run(
+                ["powershell", "-Command", ps_command],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                import json
+                try:
+                    # Tenta parsear como JSON primeiro
+                    ps_data = json.loads(result.stdout.strip())
+                    
+                    # Extrai informações do switch
+                    if ps_data.get('SystemName'):
+                        info['switch_name'] = ps_data['SystemName']
+                    elif ps_data.get('SwitchName'):
+                        info['switch_name'] = ps_data['SwitchName']
+                    elif ps_data.get('ChassisId'):
+                        info['switch_name'] = ps_data['ChassisId']
+                    
+                    # Port ID - pode vir em diferentes formatos
+                    # Formato esperado: "MES (GE1/0/17)" - PortDescription (PortID)
+                    port_id_value = None
+                    port_desc_value = None
+                    
+                    if ps_data.get('PortID'):
+                        port_id_value = str(ps_data['PortID']).strip()
+                    
+                    if ps_data.get('PortDescription'):
+                        port_desc_value = str(ps_data['PortDescription']).strip()
+                    
+                    # Combina PortDescription e PortID no formato esperado
+                    if port_desc_value and port_id_value:
+                        # Se já está no formato correto, usa como está
+                        if f"({port_id_value})" in port_desc_value or port_desc_value in port_id_value:
+                            info['port_id'] = port_desc_value if f"({port_id_value})" in port_desc_value else f"{port_desc_value} ({port_id_value})"
+                        else:
+                            # Formato: "MES (GE1/0/17)"
+                            info['port_id'] = f"{port_desc_value} ({port_id_value})"
+                    elif port_desc_value:
+                        info['port_id'] = port_desc_value
+                    elif port_id_value:
+                        info['port_id'] = port_id_value
+                    
+                    # System Description (modelo do switch)
+                    if ps_data.get('SystemDescription'):
+                        info['switch_model'] = ps_data['SystemDescription']
+                    
+                    # Management Address (IP do switch)
+                    if ps_data.get('ManagementAddress'):
+                        mgmt_addr = str(ps_data['ManagementAddress']).strip()
+                        # Pode vir como IP completo ou parcial
+                        if re.match(r'^\d+\.\d+\.\d+\.\d+$', mgmt_addr):
+                            info['switch_ip'] = mgmt_addr
+                        else:
+                            # Pode estar em formato diferente, tenta extrair IP completo
+                            ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', mgmt_addr)
+                            if ip_match:
+                                info['switch_ip'] = ip_match.group(1)
+                            else:
+                                # Pode ser um endereço parcial (como "4C"), tenta obter do gateway
+                                # e combinar se necessário
+                                if mgmt_addr and len(mgmt_addr) <= 10:
+                                    # Pode ser parte do IP, mantém como está por enquanto
+                                    # O gateway info vai preencher o IP completo
+                                    pass
+                    
+                    # VLAN ID
+                    if ps_data.get('VlanID'):
+                        vlan = str(ps_data['VlanID'])
+                        # Extrai número da VLAN se vier em formato complexo
+                        vlan_match = re.search(r'(\d+)', vlan)
+                        if vlan_match:
+                            info['vlan_id'] = vlan_match.group(1)
+                        else:
+                            info['vlan_id'] = vlan
+                    
+                except json.JSONDecodeError:
+                    # Se não for JSON, tenta parsear saída do netsh
+                    output = result.stdout.strip()
+                    if output:
+                        self._parse_netsh_lldp_output(output, info)
+        except Exception as e:
+            print(f"Erro ao obter informações LLDP: {e}")
+            # Tenta fallback para netsh
+            try:
+                result = subprocess.run(
+                    ["netsh", "lldp", "show", "neighbors", "verbose"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+                if result.returncode == 0 and result.stdout:
+                    self._parse_netsh_lldp_output(result.stdout, info)
+            except Exception:
+                pass
+        
         return info
+    
+    def _parse_netsh_lldp_output(self, output, info):
+        """Parseia saída do netsh lldp show neighbors"""
+        try:
+            lines = output.split('\n')
+            current_section = None
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # System Name
+                if 'System Name:' in line or 'SystemName:' in line:
+                    parts = line.split(':', 1)
+                    if len(parts) > 1:
+                        name = parts[1].strip()
+                        if name and not info.get('switch_name'):
+                            info['switch_name'] = name
+                
+                # Port ID
+                elif 'Port ID:' in line or 'PortID:' in line or 'Port Description:' in line:
+                    parts = line.split(':', 1)
+                    if len(parts) > 1:
+                        port_info = parts[1].strip()
+                        if port_info:
+                            # Se já tem port_id, combina
+                            if info.get('port_id'):
+                                if port_info not in info['port_id']:
+                                    info['port_id'] = f"{info['port_id']} ({port_info})"
+                            else:
+                                info['port_id'] = port_info
+                
+                # System Description (modelo)
+                elif 'System Description:' in line or 'SystemDescription:' in line:
+                    parts = line.split(':', 1)
+                    if len(parts) > 1:
+                        desc = parts[1].strip()
+                        if desc and not info.get('switch_model'):
+                            info['switch_model'] = desc
+                
+                # Management Address (IP)
+                elif 'Management Address:' in line or 'ManagementAddress:' in line:
+                    parts = line.split(':', 1)
+                    if len(parts) > 1:
+                        addr = parts[1].strip()
+                        # Tenta extrair IP
+                        ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', addr)
+                        if ip_match:
+                            if not info.get('switch_ip'):
+                                info['switch_ip'] = ip_match.group(1)
+                
+                # VLAN ID
+                elif 'VLAN ID:' in line or 'VlanID:' in line or 'VLAN:' in line:
+                    parts = line.split(':', 1)
+                    if len(parts) > 1:
+                        vlan = parts[1].strip()
+                        # Extrai número da VLAN
+                        vlan_match = re.search(r'(\d+)', vlan)
+                        if vlan_match:
+                            if not info.get('vlan_id'):
+                                info['vlan_id'] = vlan_match.group(1)
+                
+                # TLV que pode conter VLAN
+                elif 'TLV Type:' in line and ('127' in line or '8' in line):
+                    # Próxima linha pode ter VLAN
+                    pass
+                
+                # Chassis ID (pode ser o nome do switch)
+                elif 'Chassis ID:' in line or 'ChassisId:' in line:
+                    parts = line.split(':', 1)
+                    if len(parts) > 1:
+                        chassis_id = parts[1].strip()
+                        if chassis_id and not info.get('switch_name'):
+                            # Se parece com um nome (não é só MAC), usa como nome
+                            if not re.match(r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$', chassis_id):
+                                info['switch_name'] = chassis_id
+        except Exception as e:
+            print(f"Erro ao parsear saída netsh LLDP: {e}")
     
     def _get_snmp_info(self):
         """Obtém informações do switch via SNMP"""
         info = {}
         try:
-            # SNMP requer biblioteca pysnmp ou snmpwalk instalado
-            # Tenta usar snmpwalk se disponível
-            result = subprocess.run(
-                ["snmpwalk", "-v", "2c", "-c", "public", "localhost", "1.3.6.1.2.1.1"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-            )
-            # Se snmpwalk estiver disponível, pode processar a saída
-        except FileNotFoundError:
-            # snmpwalk não está instalado
-            pass
-        except Exception:
-            pass
+            # Primeiro, tenta obter o IP do switch do gateway
+            gateway = None
+            if hasattr(self, 'network_info') and self.network_info:
+                gateway = self.network_info.get('default_gateway')
+            if not gateway or gateway == 'N/A':
+                gateway = self._get_default_gateway()
+            
+            if not gateway or gateway == 'N/A':
+                return info
+            
+            # Tenta SNMP com diferentes community strings comuns
+            communities = ['public', 'private', 'community']
+            
+            for community in communities:
+                try:
+                    # Obtém System Description (modelo do switch)
+                    result = subprocess.run(
+                        ["snmpget", "-v", "2c", "-c", community, gateway, "1.3.6.1.2.1.1.1.0"],
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                    )
+                    if result.returncode == 0 and result.stdout:
+                        # Extrai System Description
+                        match = re.search(r'STRING:\s*(.+)', result.stdout)
+                        if match:
+                            desc = match.group(1).strip()
+                            if desc and not info.get('switch_model'):
+                                info['switch_model'] = desc
+                    
+                    # Obtém System Name
+                    result = subprocess.run(
+                        ["snmpget", "-v", "2c", "-c", community, gateway, "1.3.6.1.2.1.1.5.0"],
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                    )
+                    if result.returncode == 0 and result.stdout:
+                        match = re.search(r'STRING:\s*(.+)', result.stdout)
+                        if match:
+                            name = match.group(1).strip()
+                            if name and not info.get('switch_name'):
+                                info['switch_name'] = name
+                    
+                    # Se conseguiu obter informações, define o IP
+                    if info.get('switch_model') or info.get('switch_name'):
+                        info['switch_ip'] = gateway
+                        break
+                        
+                except FileNotFoundError:
+                    # snmpget não está instalado, tenta via PowerShell
+                    break
+                except Exception:
+                    continue
+            
+            # Se snmpget não está disponível, tenta via PowerShell
+            if not info.get('switch_model') and not info.get('switch_name'):
+                try:
+                    ps_command = f'''
+$target = "{gateway}"
+try {{
+    $snmp = New-Object -ComObject oleprn.OleSNMP
+    $snmp.Open($target, "public", 2, 2000)
+    
+    $sysDesc = $snmp.Get(".1.3.6.1.2.1.1.1.0")
+    $sysName = $snmp.Get(".1.3.6.1.2.1.1.5.0")
+    
+    $result = @{{
+        SwitchModel = $sysDesc
+        SwitchName = $sysName
+        SwitchIP = $target
+    }}
+    $result | ConvertTo-Json -Compress
+    $snmp.Close()
+}} catch {{
+    # Se falhar, retorna vazio
+}}
+'''
+                    result = subprocess.run(
+                        ["powershell", "-Command", ps_command],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        import json
+                        try:
+                            ps_data = json.loads(result.stdout.strip())
+                            if ps_data.get('SwitchModel'):
+                                info['switch_model'] = ps_data['SwitchModel']
+                            if ps_data.get('SwitchName'):
+                                info['switch_name'] = ps_data['SwitchName']
+                            if ps_data.get('SwitchIP'):
+                                info['switch_ip'] = ps_data['SwitchIP']
+                        except json.JSONDecodeError:
+                            pass
+                except Exception:
+                    pass
+                    
+        except Exception as e:
+            print(f"Erro ao obter informações SNMP: {e}")
+        return info
+    
+    def _get_switch_info_from_gateway(self):
+        """Obtém informações do switch a partir do gateway padrão"""
+        info = {}
+        try:
+            # Obtém gateway do network_info ou tenta obter novamente
+            gateway = None
+            if hasattr(self, 'network_info') and self.network_info:
+                gateway = self.network_info.get('default_gateway')
+            
+            if not gateway or gateway == 'N/A' or gateway == 'None' or not gateway:
+                gateway = self._get_default_gateway()
+            
+            if gateway and gateway != 'N/A' and gateway != 'None' and gateway:
+                info['switch_ip'] = gateway
+                
+                # Tenta resolver nome via DNS reverso
+                try:
+                    hostname, _, _ = socket.gethostbyaddr(gateway)
+                    if hostname:
+                        # Remove domínio se houver e limpa o nome
+                        switch_name = hostname.split('.')[0].strip()
+                        if switch_name:
+                            info['switch_name'] = switch_name
+                        info['status'] = "Conectado"
+                except (socket.herror, socket.gaierror, OSError):
+                    # Se não conseguiu resolver, tenta via nbtstat
+                    try:
+                        result = subprocess.run(
+                            ["nbtstat", "-A", gateway],
+                            capture_output=True,
+                            text=True,
+                            timeout=3,
+                            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                        )
+                        if result.returncode == 0:
+                            # Procura por nome na saída do nbtstat
+                            for line in result.stdout.split('\n'):
+                                if 'UNIQUE' in line or 'GROUP' in line:
+                                    parts = line.split()
+                                    if len(parts) > 0:
+                                        name = parts[0].strip()
+                                        # Remove caracteres especiais
+                                        name = name.replace('<', '').replace('>', '').strip()
+                                        if name and name != '00' and len(name) > 1:
+                                            info['switch_name'] = name
+                                            break
+                    except Exception:
+                        pass
+                    
+                    # Mesmo sem resolver nome, se tem gateway, está conectado
+                    if info.get('status') != 'Conectado':
+                        info['status'] = "Conectado"
+        except Exception as e:
+            print(f"Erro ao obter informações do gateway: {e}")
         return info
     
     def _get_switch_info_from_arp(self):
@@ -649,42 +1081,140 @@ class NetworkDiagnosticModule:
         try:
             # Obtém gateway que pode ser o switch
             gateway = self.network_info.get('default_gateway')
-            if gateway and gateway != 'N/A' and gateway != 'None':
-                info['switch_ip'] = gateway
-                # Tenta resolver nome
-                try:
-                    hostname = socket.gethostbyaddr(gateway)[0]
-                    info['switch_name'] = hostname
-                    # Se conseguiu resolver, assume que está conectado
-                    info['status'] = "Conectado"
-                except Exception:
-                    # Mesmo sem resolver nome, se tem gateway, está conectado
-                    info['status'] = "Conectado"
+            if not gateway or gateway == 'N/A' or gateway == 'None':
+                gateway = self._get_default_gateway()
             
-            # Tenta obter informações via nbtstat para descobrir nome do dispositivo
             if gateway and gateway != 'N/A' and gateway != 'None':
+                # Tenta pingar o gateway para garantir que está na tabela ARP
+                try:
+                    subprocess.run(
+                        ["ping", "-n", "1", "-w", "500", gateway],
+                        capture_output=True,
+                        timeout=1,
+                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                    )
+                except Exception:
+                    pass
+                
+                # Obtém tabela ARP
                 try:
                     result = subprocess.run(
-                        ["nbtstat", "-A", gateway],
+                        ["arp", "-a", gateway],
                         capture_output=True,
                         text=True,
-                        timeout=3,
+                        timeout=2,
                         creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
                     )
                     if result.returncode == 0:
-                        # Procura por nome na saída do nbtstat
+                        # Procura pelo gateway na tabela ARP
                         for line in result.stdout.split('\n'):
-                            if 'UNIQUE' in line or 'GROUP' in line:
+                            if gateway in line:
                                 parts = line.split()
-                                if len(parts) > 0:
-                                    name = parts[0].strip()
-                                    if name and name != '<00>':
-                                        info['switch_name'] = name
+                                if len(parts) >= 2:
+                                    # Pode ter informações adicionais
+                                    mac = parts[1] if len(parts) > 1 else None
+                                    if mac and mac != 'ff-ff-ff-ff-ff-ff':
+                                        # MAC encontrado, switch está acessível
+                                        if not info.get('switch_ip'):
+                                            info['switch_ip'] = gateway
+                                        if not info.get('status'):
+                                            info['status'] = "Conectado"
                                         break
                 except Exception:
                     pass
         except Exception:
             pass
+        return info
+    
+    def _get_port_info_from_adapters(self):
+        """Obtém informações de porta a partir dos adaptadores de rede"""
+        info = {}
+        try:
+            # Obtém adaptadores do network_info
+            adapters = []
+            if hasattr(self, 'network_info') and self.network_info:
+                adapters = self.network_info.get('adapters', [])
+            
+            # Procura por adaptador Ethernet ativo (com IP)
+            for adapter in adapters:
+                adapter_name = adapter.get('name', '').lower()
+                adapter_desc = adapter.get('description', '').lower()
+                
+                # Verifica se é adaptador Ethernet (não Wi-Fi, não loopback, não virtual)
+                is_ethernet = (
+                    'ethernet' in adapter_name or 'ethernet' in adapter_desc or
+                    'lan' in adapter_name or 'local area' in adapter_desc
+                ) and not any(x in adapter_name or x in adapter_desc for x in [
+                    'wireless', 'wi-fi', 'wifi', 'bluetooth', 'loopback', 'virtual', 'vmware', 'virtualbox'
+                ])
+                
+                if is_ethernet and (adapter.get('ipv4_address') or adapter.get('ipv6_address')):
+                    # Encontrou adaptador Ethernet ativo
+                    if adapter.get('name'):
+                        info['port_id'] = adapter.get('name')
+                    elif adapter.get('description'):
+                        info['port_id'] = adapter.get('description')
+                    
+                    # Se tem gateway, pode ser o IP do switch
+                    if adapter.get('default_gateway'):
+                        if not info.get('switch_ip'):
+                            info['switch_ip'] = adapter.get('default_gateway')
+                    
+                    break
+        except Exception as e:
+            print(f"Erro ao obter informações de porta dos adaptadores: {e}")
+        return info
+    
+    def _get_vlan_info_from_netsh(self):
+        """Tenta obter informações de VLAN via netsh interface"""
+        info = {}
+        try:
+            # Tenta obter VLAN via netsh interface
+            result = subprocess.run(
+                ["netsh", "interface", "show", "interface"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
+            
+            if result.returncode == 0:
+                # Tenta obter VLAN via PowerShell Get-NetAdapter
+                ps_command = '''
+Get-NetAdapter | Where-Object {$_.Status -eq "Up"} | 
+ForEach-Object {
+    $adapter = $_
+    # Tenta obter VLAN via propriedades do adaptador
+    $vlan = $null
+    if ($adapter.PSObject.Properties['VlanID']) {
+        $vlan = $adapter.VlanID
+    }
+    if ($vlan) {
+        @{VlanID = $vlan} | ConvertTo-Json -Compress
+    }
+}
+'''
+                result = subprocess.run(
+                    ["powershell", "-Command", ps_command],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    import json
+                    try:
+                        ps_data = json.loads(result.stdout.strip())
+                        if ps_data.get('VlanID'):
+                            vlan = str(ps_data['VlanID'])
+                            vlan_match = re.search(r'(\d+)', vlan)
+                            if vlan_match:
+                                info['vlan_id'] = vlan_match.group(1)
+                    except json.JSONDecodeError:
+                        pass
+        except Exception as e:
+            print(f"Erro ao obter VLAN via netsh: {e}")
         return info
     
     def _get_wmi_port_info(self):
@@ -697,7 +1227,7 @@ class NetworkDiagnosticModule:
             # Obtém informações de adaptadores de rede
             for adapter in c.Win32_NetworkAdapter(PhysicalAdapter=True):
                 if adapter.NetConnectionStatus == 2:  # Conectado
-                    # Pode obter informações de velocidade/duplex
+                    # Obtém informações de velocidade/duplex
                     speed = adapter.Speed if adapter.Speed else 0
                     if speed:
                         if speed >= 1000000000:  # 1 Gbps
@@ -707,17 +1237,93 @@ class NetworkDiagnosticModule:
                         elif speed >= 10000000:  # 10 Mbps
                             info['port_duplex'] = "Full Duplex (10 Mbps)"
                         else:
-                            info['port_duplex'] = f"Full Duplex ({speed} bps)"
+                            # Converte para formato legível
+                            if speed >= 1000000:
+                                speed_mbps = speed / 1000000
+                                info['port_duplex'] = f"Full Duplex ({speed_mbps:.0f} Mbps)"
+                            else:
+                                info['port_duplex'] = f"Full Duplex ({speed} bps)"
                     
                     # Tenta obter informações adicionais
                     if adapter.NetConnectionID:
-                        # Pode usar o nome da conexão como identificador de porta
+                        # Usa o nome da conexão como identificador de porta
                         info['port_id'] = adapter.NetConnectionID
+                    elif adapter.Name:
+                        # Usa o nome do adaptador como fallback
+                        info['port_id'] = adapter.Name
+                    elif adapter.Description:
+                        # Usa a descrição como último recurso
+                        info['port_id'] = adapter.Description
+                    
+                    # Tenta obter informações de configuração de IP para identificar porta
+                    try:
+                        for ip_config in c.Win32_NetworkAdapterConfiguration(Description=adapter.Description):
+                            if ip_config.IPEnabled:
+                                # Pode ter informações de VLAN se disponíveis
+                                if hasattr(ip_config, 'ServiceName') and ip_config.ServiceName:
+                                    if not info.get('port_id'):
+                                        info['port_id'] = ip_config.ServiceName
+                                # Tenta obter índice da interface
+                                if hasattr(ip_config, 'Index') and ip_config.Index:
+                                    if not info.get('port_id'):
+                                        info['port_id'] = f"Interface {ip_config.Index}"
+                                break
+                    except Exception:
+                        pass
+                    
+                    # Se encontrou informações, define status
+                    if not info.get('status'):
+                        info['status'] = "Conectado"
+                    
                     break
         except ImportError:
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Erro ao obter informações WMI: {e}")
+        return info
+    
+    def _get_switch_info_from_powershell(self):
+        """Obtém informações do switch via PowerShell"""
+        info = {}
+        try:
+            # Tenta obter informações via Get-NetAdapterStatistics
+            ps_command = '''
+Get-NetAdapter | Where-Object {$_.Status -eq "Up" -and $_.PhysicalMediaType -eq "802.3"} | 
+Select-Object -First 1 | 
+ForEach-Object {
+    $adapter = $_
+    $stats = Get-NetAdapterStatistics -Name $adapter.Name
+    $result = @{
+        PortID = $adapter.Name
+        PortDuplex = if ($adapter.LinkSpeed) { "Full Duplex ($($adapter.LinkSpeed))" } else { "N/A" }
+    }
+    $result | ConvertTo-Json -Compress
+}
+'''
+            result = subprocess.run(
+                ["powershell", "-Command", ps_command],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                import json
+                try:
+                    ps_data = json.loads(result.stdout.strip())
+                    if ps_data.get('PortID'):
+                        info['port_id'] = ps_data['PortID']
+                    if ps_data.get('PortDuplex') and ps_data['PortDuplex'] != 'N/A':
+                        info['port_duplex'] = ps_data['PortDuplex']
+                except json.JSONDecodeError:
+                    # Tenta parsear manualmente se não for JSON válido
+                    output = result.stdout.strip()
+                    if 'PortID' in output:
+                        # Extrai informações manualmente
+                        pass
+        except Exception as e:
+            print(f"Erro ao obter informações via PowerShell: {e}")
         return info
     
     def _collect_network_info_alternative(self):
