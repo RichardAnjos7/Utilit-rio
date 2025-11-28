@@ -25,6 +25,10 @@ class NetworkDiagnosticModule:
         self.collect_thread = None
         self.is_collecting = False
         self.loading_label = None
+        self.refresh_button = None
+        self.loading_indicator = None
+        self.loading_animation_id = None
+        self.is_manual_refresh = False
     
     def get_display_name(self):
         """Retorna o nome de exibição do módulo"""
@@ -57,13 +61,22 @@ class NetworkDiagnosticModule:
         controls_frame.grid(row=2, column=0, columnspan=2, pady=(0, 15), sticky=(tk.W, tk.E))
         
         # Botão para atualizar
-        refresh_button = ttk.Button(
+        self.refresh_button = ttk.Button(
             controls_frame,
             text="Atualizar Informações",
             command=lambda: self._refresh_network_info(),
             width=25
         )
-        refresh_button.grid(row=0, column=0, padx=(0, 10))
+        self.refresh_button.grid(row=0, column=0, padx=(0, 10))
+        
+        # Indicador de carregamento (spinner)
+        self.loading_indicator = ttk.Label(
+            controls_frame,
+            text="",
+            font=("Segoe UI", 9),
+            foreground="blue"
+        )
+        self.loading_indicator.grid(row=0, column=2, padx=(10, 0))
         
         # Checkbox para atualização automática
         self.auto_refresh_var = tk.BooleanVar(value=False)
@@ -117,22 +130,106 @@ class NetworkDiagnosticModule:
     
     def _show_loading(self):
         """Mostra indicador de carregamento"""
+        # Verifica se os frames ainda existem
+        if not hasattr(self, 'left_frame') or not self.left_frame or not self.left_frame.winfo_exists():
+            return
+        if not hasattr(self, 'right_frame') or not self.right_frame or not self.right_frame.winfo_exists():
+            return
+        if not hasattr(self, 'switch_frame') or not self.switch_frame or not self.switch_frame.winfo_exists():
+            return
+        
         # Limpa frames
-        for widget in self.left_frame.winfo_children():
-            widget.destroy()
-        for widget in self.right_frame.winfo_children():
-            widget.destroy()
-        for widget in self.switch_frame.winfo_children():
-            widget.destroy()
+        try:
+            for widget in self.left_frame.winfo_children():
+                try:
+                    widget.destroy()
+                except (tk.TclError, AttributeError):
+                    pass
+        except (tk.TclError, AttributeError):
+            pass
+        
+        try:
+            for widget in self.right_frame.winfo_children():
+                try:
+                    widget.destroy()
+                except (tk.TclError, AttributeError):
+                    pass
+        except (tk.TclError, AttributeError):
+            pass
+        
+        try:
+            for widget in self.switch_frame.winfo_children():
+                try:
+                    widget.destroy()
+                except (tk.TclError, AttributeError):
+                    pass
+        except (tk.TclError, AttributeError):
+            pass
         
         # Mostra mensagem de carregamento
-        self.loading_label = ttk.Label(
-            self.left_frame,
-            text="Carregando informações de rede...",
-            font=("Segoe UI", 10),
-            foreground="blue"
-        )
-        self.loading_label.grid(row=0, column=0, pady=50)
+        try:
+            self.loading_label = ttk.Label(
+                self.left_frame,
+                text="Carregando informações de rede...",
+                font=("Segoe UI", 10),
+                foreground="blue"
+            )
+            self.loading_label.grid(row=0, column=0, pady=50)
+        except (tk.TclError, AttributeError):
+            self.loading_label = None
+    
+    def _show_refresh_loading(self):
+        """Mostra indicador de carregamento quando o botão de atualizar é clicado"""
+        if not hasattr(self, 'refresh_button') or not self.refresh_button:
+            return
+        
+        try:
+            # Desabilita o botão
+            if self.refresh_button.winfo_exists():
+                self.refresh_button.config(state="disabled")
+            
+            # Mostra indicador de carregamento animado
+            if self.loading_indicator and self.loading_indicator.winfo_exists():
+                self._animate_loading_indicator()
+        except (tk.TclError, AttributeError):
+            pass
+    
+    def _hide_refresh_loading(self):
+        """Esconde indicador de carregamento e reabilita o botão"""
+        if not hasattr(self, 'refresh_button') or not self.refresh_button:
+            return
+        
+        try:
+            # Para a animação
+            if self.loading_animation_id and self.root_window:
+                self.root_window.after_cancel(self.loading_animation_id)
+                self.loading_animation_id = None
+            
+            # Esconde o indicador
+            if self.loading_indicator and self.loading_indicator.winfo_exists():
+                self.loading_indicator.config(text="")
+            
+            # Reabilita o botão
+            if self.refresh_button.winfo_exists():
+                self.refresh_button.config(state="normal")
+        except (tk.TclError, AttributeError):
+            pass
+    
+    def _animate_loading_indicator(self, dots=0):
+        """Anima o indicador de carregamento com pontos que aparecem e desaparecem"""
+        if not self.loading_indicator or not self.loading_indicator.winfo_exists():
+            return
+        
+        try:
+            # Cria texto com pontos animados (0 a 3 pontos)
+            dots_text = "." * (dots % 4)
+            self.loading_indicator.config(text=f"Atualizando{dots_text}")
+            
+            # Agenda próxima animação
+            if self.root_window:
+                self.loading_animation_id = self.root_window.after(500, lambda: self._animate_loading_indicator(dots + 1))
+        except (tk.TclError, AttributeError):
+            pass
     
     def _toggle_auto_refresh(self):
         """Ativa/desativa atualização automática"""
@@ -151,10 +248,54 @@ class NetworkDiagnosticModule:
             while self.auto_refresh:
                 time.sleep(5)
                 if self.auto_refresh:
-                    self.root_window.after(0, self._refresh_network_info)
+                    self.root_window.after(0, self._refresh_network_info_silent)
         
         self.refresh_thread = threading.Thread(target=refresh_loop, daemon=True)
         self.refresh_thread.start()
+    
+    def _refresh_network_info_silent(self):
+        """Atualiza as informações de rede sem mostrar indicador do botão (para auto-refresh)"""
+        if self.is_collecting:
+            return
+        
+        self.is_collecting = True
+        self.is_manual_refresh = False  # Marca como atualização automática
+        
+        def collect_in_thread():
+            try:
+                # Coleta informações
+                network_info = self._collect_network_info()
+                
+                # Debug: verifica se coletou algo
+                adapters = network_info.get('adapters', [])
+                if not adapters:
+                    # Tenta método alternativo
+                    alt_info = self._collect_network_info_alternative()
+                    if alt_info.get('adapters'):
+                        network_info = alt_info
+                    else:
+                        # Se ainda não tem adaptadores, pelo menos mostra informações básicas
+                        if not network_info.get('hostname'):
+                            network_info['hostname'] = socket.gethostname()
+                        if not network_info.get('fqdn'):
+                            network_info['fqdn'] = socket.getfqdn()
+                
+                # Atualiza na thread principal
+                if self.root_window:
+                    self.network_info = network_info
+                    self.root_window.after(0, self._update_ui)
+                    
+            except Exception as e:
+                import traceback
+                error_msg = f"Erro ao coletar informações de rede: {str(e)}\n\n{traceback.format_exc()}"
+                if self.root_window:
+                    self.root_window.after(0, lambda: messagebox.showerror("Erro", error_msg))
+            finally:
+                self.is_collecting = False
+                self.is_manual_refresh = False
+        
+        thread = threading.Thread(target=collect_in_thread, daemon=True)
+        thread.start()
     
     def _stop_auto_refresh(self):
         """Para atualização automática"""
@@ -166,6 +307,7 @@ class NetworkDiagnosticModule:
             return
         
         self.is_collecting = True
+        self.is_manual_refresh = False  # Marca como atualização automática/inicial
         
         def collect_in_thread():
             try:
@@ -190,6 +332,10 @@ class NetworkDiagnosticModule:
                 if self.root_window:
                     self.network_info = network_info
                     self.root_window.after(0, self._update_ui)
+                    # Não esconde o indicador do botão se não foi atualização manual
+                    if not self.is_manual_refresh:
+                        # Apenas limpa o indicador interno se necessário
+                        pass
                     
             except Exception as e:
                 import traceback
@@ -198,6 +344,7 @@ class NetworkDiagnosticModule:
                     self.root_window.after(0, lambda: messagebox.showerror("Erro", error_msg))
             finally:
                 self.is_collecting = False
+                self.is_manual_refresh = False
         
         self.collect_thread = threading.Thread(target=collect_in_thread, daemon=True)
         self.collect_thread.start()
@@ -208,6 +355,10 @@ class NetworkDiagnosticModule:
             return
         
         self.is_collecting = True
+        self.is_manual_refresh = True  # Marca como atualização manual
+        
+        # Mostra indicador de carregamento e desabilita botão
+        self._show_refresh_loading()
         
         def collect_in_thread():
             try:
@@ -232,14 +383,17 @@ class NetworkDiagnosticModule:
                 if self.root_window:
                     self.network_info = network_info
                     self.root_window.after(0, self._update_ui)
+                    self.root_window.after(0, self._hide_refresh_loading)
                     
             except Exception as e:
                 import traceback
                 error_msg = f"Erro ao coletar informações de rede: {str(e)}\n\n{traceback.format_exc()}"
                 if self.root_window:
                     self.root_window.after(0, lambda: messagebox.showerror("Erro", error_msg))
+                    self.root_window.after(0, self._hide_refresh_loading)
             finally:
                 self.is_collecting = False
+                self.is_manual_refresh = False
         
         thread = threading.Thread(target=collect_in_thread, daemon=True)
         thread.start()
@@ -626,12 +780,15 @@ class NetworkDiagnosticModule:
             # LLDP geralmente tem as informações mais completas (porta, VLAN, modelo)
             lldp_info = self._get_lldp_info()
             if lldp_info:
+                print(f"LLDP retornou: {lldp_info}")  # Debug
                 for key, value in lldp_info.items():
                     if switch_info.get(key) == 'N/A' and value != 'N/A':
                         switch_info[key] = value
                     # Se LLDP trouxe informações, prioriza elas
                     elif value != 'N/A' and switch_info.get(key) != value:
                         switch_info[key] = value
+            else:
+                print("LLDP não retornou informações")  # Debug
             
             # Tenta obter via SNMP (se disponível)
             snmp_info = self._get_snmp_info()
@@ -656,6 +813,18 @@ class NetworkDiagnosticModule:
                 if gateway and gateway != 'N/A' and gateway:
                     switch_info['switch_ip'] = gateway
             
+            # Se ainda não tem informações suficientes, tenta método alternativo via gateway
+            if (switch_info.get('switch_name') == 'N/A' or 
+                switch_info.get('port_id') == 'N/A' or 
+                switch_info.get('vlan_id') == 'N/A' or
+                switch_info.get('switch_model') == 'N/A'):
+                # Tenta obter mais informações via métodos alternativos
+                alt_info = self._get_switch_info_alternative()
+                if alt_info:
+                    for key, value in alt_info.items():
+                        if switch_info.get(key) == 'N/A' and value != 'N/A':
+                            switch_info[key] = value
+            
             # Define status baseado nas informações coletadas
             if switch_info.get('switch_ip') != 'N/A' or switch_info.get('switch_name') != 'N/A':
                 if switch_info.get('status') == 'N/A':
@@ -663,36 +832,144 @@ class NetworkDiagnosticModule:
             elif switch_info.get('status') == 'N/A':
                 switch_info['status'] = 'Desconectado'
             
+            print(f"Switch info final: {switch_info}")  # Debug
+            
         except Exception as e:
             print(f"Erro ao obter informações do switch: {e}")
+            import traceback
+            traceback.print_exc()
         
         return switch_info
+    
+    def _get_switch_info_alternative(self):
+        """Método alternativo para obter informações do switch quando LLDP não está disponível"""
+        info = {}
+        try:
+            # Obtém gateway
+            gateway = None
+            if hasattr(self, 'network_info') and self.network_info:
+                gateway = self.network_info.get('default_gateway')
+            if not gateway or gateway == 'N/A':
+                gateway = self._get_default_gateway()
+            
+            if not gateway or gateway == 'N/A':
+                return info
+            
+            # Tenta obter informações via SNMP do gateway
+            snmp_info = self._get_snmp_info()
+            if snmp_info:
+                info.update(snmp_info)
+            
+            # Tenta obter informações via ping e traceroute para identificar porta
+            # Tenta obter informações via PowerShell Get-NetRoute
+            ps_command = f'''
+$gateway = "{gateway}"
+try {{
+    $routes = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
+    if ($routes) {{
+        $route = $routes | Where-Object {{ $_.NextHop -eq $gateway }} | Select-Object -First 1
+        if ($route) {{
+            $interface = Get-NetAdapter -InterfaceIndex $route.InterfaceIndex -ErrorAction SilentlyContinue
+            if ($interface) {{
+                $result = @{{
+                    PortID = $interface.Name
+                    PortDescription = $interface.InterfaceDescription
+                }}
+                $result | ConvertTo-Json -Compress
+            }}
+        }}
+    }}
+}} catch {{
+    # Ignora erros
+}}
+'''
+            result = subprocess.run(
+                ["powershell", "-Command", ps_command],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                import json
+                try:
+                    ps_data = json.loads(result.stdout.strip())
+                    if ps_data.get('PortID'):
+                        if not info.get('port_id'):
+                            info['port_id'] = ps_data['PortID']
+                    if ps_data.get('PortDescription'):
+                        if not info.get('port_id'):
+                            info['port_id'] = ps_data['PortDescription']
+                except json.JSONDecodeError:
+                    pass
+                    
+        except Exception as e:
+            print(f"Erro no método alternativo: {e}")
+        return info
     
     def _get_lldp_info(self):
         """Obtém informações via LLDP/CDP usando PowerShell Get-NetLldpNeighbor"""
         info = {}
         try:
+            # Primeiro verifica se LLDP está habilitado
+            ps_check_command = '''
+try {
+    $lldpAgent = Get-NetLldpAgent -ErrorAction SilentlyContinue
+    if ($lldpAgent) {
+        $lldpAgent.Enabled
+    } else {
+        $false
+    }
+} catch {
+    $false
+}
+'''
+            check_result = subprocess.run(
+                ["powershell", "-Command", ps_check_command],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
+            
+            lldp_enabled = False
+            if check_result.returncode == 0 and check_result.stdout.strip():
+                lldp_enabled = check_result.stdout.strip().lower() == 'true'
+            
             # Tenta obter via PowerShell Get-NetLldpNeighbor (método mais confiável no Windows)
             ps_command = '''
+$ErrorActionPreference = "SilentlyContinue"
 try {
     $neighbors = Get-NetLldpNeighbor -ErrorAction SilentlyContinue
-    if ($neighbors) {
+    if ($neighbors -and $neighbors.Count -gt 0) {
         $neighbor = $neighbors | Select-Object -First 1
-        $result = @{
-            SwitchName = $neighbor.ChassisId
-            PortID = $neighbor.PortId
-            PortDescription = $neighbor.PortDescription
-            SystemName = $neighbor.SystemName
-            SystemDescription = $neighbor.SystemDescription
-            ManagementAddress = $neighbor.ManagementAddress
+        $result = @{}
+        
+        # Extrai todas as propriedades disponíveis
+        if ($neighbor.SystemName) { $result.SystemName = $neighbor.SystemName.ToString() }
+        if ($neighbor.ChassisId) { $result.SwitchName = $neighbor.ChassisId.ToString() }
+        if ($neighbor.PortId) { $result.PortID = $neighbor.PortId.ToString() }
+        if ($neighbor.PortDescription) { $result.PortDescription = $neighbor.PortDescription.ToString() }
+        if ($neighbor.SystemDescription) { $result.SystemDescription = $neighbor.SystemDescription.ToString() }
+        if ($neighbor.ManagementAddress) { 
+            $mgmt = $neighbor.ManagementAddress
+            if ($mgmt -is [System.Net.IPAddress]) {
+                $result.ManagementAddress = $mgmt.ToString()
+            } else {
+                $result.ManagementAddress = $mgmt.ToString()
+            }
         }
         
+        # Debug: mostra o que foi coletado
+        Write-Host "PortID: $($neighbor.PortId)"
+        Write-Host "PortDescription: $($neighbor.PortDescription)"
+        
         # Tenta obter VLAN via TLVs
-        # VLAN geralmente vem em TLVs específicos
         try {
-            $tlvs = Get-NetLldpNeighbor -ErrorAction SilentlyContinue | Select-Object -ExpandProperty TlvList -ErrorAction SilentlyContinue
-            if ($tlvs) {
-                foreach ($tlv in $tlvs) {
+            $tlvList = $neighbor.TlvList
+            if ($tlvList) {
+                foreach ($tlv in $tlvList) {
                     # TLV Type 127 é VLAN ID (IEEE 802.1)
                     if ($tlv.Type -eq 127 -or $tlv.Type -eq 8) {
                         if ($tlv.Value) {
@@ -707,7 +984,7 @@ try {
             }
         } catch {}
         
-        # Tenta obter todas as propriedades disponíveis
+        # Tenta obter todas as propriedades disponíveis relacionadas a VLAN
         $props = $neighbor | Get-Member -MemberType Property | Select-Object -ExpandProperty Name
         foreach ($prop in $props) {
             $value = $neighbor.$prop
@@ -717,12 +994,18 @@ try {
         }
         
         $result | ConvertTo-Json -Compress
+    } else {
+        # Se não tem neighbors, tenta netsh
+        $output = netsh lldp show neighbors verbose 2>&1
+        if ($LASTEXITCODE -eq 0 -and $output) {
+            $output | Out-String
+        }
     }
 } catch {
     # Se Get-NetLldpNeighbor não estiver disponível, tenta netsh
     try {
         $output = netsh lldp show neighbors verbose 2>&1
-        if ($LASTEXITCODE -eq 0) {
+        if ($LASTEXITCODE -eq 0 -and $output) {
             $output | Out-String
         }
     } catch {}
@@ -736,11 +1019,18 @@ try {
                 creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
             )
             
+            # Debug: verifica o que foi retornado
+            if result.stdout:
+                print(f"LLDP stdout: {result.stdout[:500]}")  # Primeiros 500 chars
+            if result.stderr:
+                print(f"LLDP stderr: {result.stderr[:500]}")
+            
             if result.returncode == 0 and result.stdout.strip():
                 import json
                 try:
                     # Tenta parsear como JSON primeiro
                     ps_data = json.loads(result.stdout.strip())
+                    print(f"LLDP JSON parseado: {ps_data}")  # Debug
                     
                     # Extrai informações do switch
                     if ps_data.get('SystemName'):
@@ -750,29 +1040,42 @@ try {
                     elif ps_data.get('ChassisId'):
                         info['switch_name'] = ps_data['ChassisId']
                     
-                    # Port ID - pode vir em diferentes formatos
-                    # Formato esperado: "MES (GE1/0/17)" - PortDescription (PortID)
+                    # Port ID - Formato esperado: "MES (GE1/0/17)"
+                    # PortDescription = "MES" (nome/descrição da porta)
+                    # PortID = "GE1/0/17" (identificador da porta no switch)
                     port_id_value = None
                     port_desc_value = None
                     
                     if ps_data.get('PortID'):
                         port_id_value = str(ps_data['PortID']).strip()
+                        # Remove espaços e caracteres extras
+                        port_id_value = port_id_value.replace('"', '').replace("'", '').strip()
                     
                     if ps_data.get('PortDescription'):
                         port_desc_value = str(ps_data['PortDescription']).strip()
+                        # Remove espaços e caracteres extras
+                        port_desc_value = port_desc_value.replace('"', '').replace("'", '').strip()
                     
-                    # Combina PortDescription e PortID no formato esperado
+                    # Combina PortDescription e PortID no formato esperado: "MES (GE1/0/17)"
                     if port_desc_value and port_id_value:
-                        # Se já está no formato correto, usa como está
-                        if f"({port_id_value})" in port_desc_value or port_desc_value in port_id_value:
-                            info['port_id'] = port_desc_value if f"({port_id_value})" in port_desc_value else f"{port_desc_value} ({port_id_value})"
+                        # Verifica se já está no formato correto
+                        if f"({port_id_value})" in port_desc_value:
+                            # Já está formatado, usa como está
+                            info['port_id'] = port_desc_value
+                        elif port_desc_value in port_id_value:
+                            # PortID já contém a descrição
+                            info['port_id'] = port_id_value
                         else:
-                            # Formato: "MES (GE1/0/17)"
+                            # Formato padrão: "MES (GE1/0/17)"
                             info['port_id'] = f"{port_desc_value} ({port_id_value})"
-                    elif port_desc_value:
-                        info['port_id'] = port_desc_value
                     elif port_id_value:
+                        # Se só tem PortID, usa ele (pode ser "GE1/0/17")
                         info['port_id'] = port_id_value
+                    elif port_desc_value:
+                        # Se só tem PortDescription, usa ele
+                        info['port_id'] = port_desc_value
+                    
+                    print(f"Port ID extraído - Desc: '{port_desc_value}', ID: '{port_id_value}', Resultado: '{info.get('port_id')}'")  # Debug
                     
                     # System Description (modelo do switch)
                     if ps_data.get('SystemDescription'):
@@ -810,10 +1113,29 @@ try {
                 except json.JSONDecodeError:
                     # Se não for JSON, tenta parsear saída do netsh
                     output = result.stdout.strip()
+                    print(f"LLDP não é JSON, tentando parsear netsh: {output[:200]}")  # Debug
                     if output:
                         self._parse_netsh_lldp_output(output, info)
+            else:
+                # Se não retornou nada, tenta netsh diretamente
+                print("LLDP PowerShell não retornou dados, tentando netsh...")  # Debug
+                try:
+                    result = subprocess.run(
+                        ["netsh", "lldp", "show", "neighbors", "verbose"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                    )
+                    if result.returncode == 0 and result.stdout:
+                        print(f"netsh LLDP output: {result.stdout[:500]}")  # Debug
+                        self._parse_netsh_lldp_output(result.stdout, info)
+                except Exception as e:
+                    print(f"Erro ao executar netsh LLDP: {e}")
         except Exception as e:
             print(f"Erro ao obter informações LLDP: {e}")
+            import traceback
+            traceback.print_exc()
             # Tenta fallback para netsh
             try:
                 result = subprocess.run(
@@ -828,6 +1150,7 @@ try {
             except Exception:
                 pass
         
+        print(f"LLDP info coletado: {info}")  # Debug
         return info
     
     def _parse_netsh_lldp_output(self, output, info):
@@ -849,18 +1172,28 @@ try {
                         if name and not info.get('switch_name'):
                             info['switch_name'] = name
                 
-                # Port ID
-                elif 'Port ID:' in line or 'PortID:' in line or 'Port Description:' in line:
+                # Port ID - pode aparecer em diferentes linhas
+                elif 'Port ID:' in line or 'PortID:' in line:
                     parts = line.split(':', 1)
                     if len(parts) > 1:
-                        port_info = parts[1].strip()
-                        if port_info:
-                            # Se já tem port_id, combina
-                            if info.get('port_id'):
-                                if port_info not in info['port_id']:
-                                    info['port_id'] = f"{info['port_id']} ({port_info})"
-                            else:
-                                info['port_id'] = port_info
+                        port_id = parts[1].strip()
+                        if port_id:
+                            # Armazena PortID separadamente
+                            if not info.get('_port_id_temp'):
+                                info['_port_id_temp'] = port_id
+                
+                # Port Description
+                elif 'Port Description:' in line or 'PortDescription:' in line:
+                    parts = line.split(':', 1)
+                    if len(parts) > 1:
+                        port_desc = parts[1].strip()
+                        if port_desc:
+                            # Armazena PortDescription separadamente
+                            if not info.get('_port_desc_temp'):
+                                info['_port_desc_temp'] = port_desc
+                
+                # Após processar todas as linhas, combina PortDescription e PortID
+                # Isso será feito no final do método
                 
                 # System Description (modelo)
                 elif 'System Description:' in line or 'SystemDescription:' in line:
@@ -906,8 +1239,32 @@ try {
                             # Se parece com um nome (não é só MAC), usa como nome
                             if not re.match(r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$', chassis_id):
                                 info['switch_name'] = chassis_id
+            
+            # Após processar todas as linhas, combina PortDescription e PortID
+            port_desc_temp = info.get('_port_desc_temp', '').strip()
+            port_id_temp = info.get('_port_id_temp', '').strip()
+            
+            if port_desc_temp and port_id_temp:
+                # Formato: "MES (GE1/0/17)"
+                if f"({port_id_temp})" not in port_desc_temp:
+                    info['port_id'] = f"{port_desc_temp} ({port_id_temp})"
+                else:
+                    info['port_id'] = port_desc_temp
+            elif port_id_temp:
+                info['port_id'] = port_id_temp
+            elif port_desc_temp:
+                info['port_id'] = port_desc_temp
+            
+            # Remove variáveis temporárias
+            if '_port_desc_temp' in info:
+                del info['_port_desc_temp']
+            if '_port_id_temp' in info:
+                del info['_port_id_temp']
+                
         except Exception as e:
             print(f"Erro ao parsear saída netsh LLDP: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _get_snmp_info(self):
         """Obtém informações do switch via SNMP"""
@@ -1043,6 +1400,7 @@ try {{
                         if switch_name:
                             info['switch_name'] = switch_name
                         info['status'] = "Conectado"
+                        print(f"Gateway nome resolvido via DNS: {switch_name}")  # Debug
                 except (socket.herror, socket.gaierror, OSError):
                     # Se não conseguiu resolver, tenta via nbtstat
                     try:
@@ -1054,6 +1412,7 @@ try {{
                             creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
                         )
                         if result.returncode == 0:
+                            print(f"nbtstat output: {result.stdout[:300]}")  # Debug
                             # Procura por nome na saída do nbtstat
                             for line in result.stdout.split('\n'):
                                 if 'UNIQUE' in line or 'GROUP' in line:
@@ -1064,15 +1423,19 @@ try {{
                                         name = name.replace('<', '').replace('>', '').strip()
                                         if name and name != '00' and len(name) > 1:
                                             info['switch_name'] = name
+                                            print(f"Switch nome via nbtstat: {name}")  # Debug
                                             break
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"Erro nbtstat: {e}")  # Debug
                     
                     # Mesmo sem resolver nome, se tem gateway, está conectado
                     if info.get('status') != 'Conectado':
                         info['status'] = "Conectado"
         except Exception as e:
             print(f"Erro ao obter informações do gateway: {e}")
+            import traceback
+            traceback.print_exc()
+        print(f"Gateway info coletado: {info}")  # Debug
         return info
     
     def _get_switch_info_from_arp(self):
@@ -1364,15 +1727,22 @@ ForEach-Object {
     
     def _display_switch_info(self):
         """Exibe informações do switch no frame dedicado"""
+        # Verifica se o frame ainda existe
+        if not hasattr(self, 'switch_frame') or not self.switch_frame or not self.switch_frame.winfo_exists():
+            return
+        
         switch_info = self.network_info.get('switch_info', {})
         
         if not switch_info:
-            ttk.Label(
-                self.switch_frame,
-                text="Informações do switch não disponíveis",
-                font=("Segoe UI", 9),
-                foreground="gray"
-            ).grid(row=0, column=0, columnspan=2, pady=20)
+            try:
+                ttk.Label(
+                    self.switch_frame,
+                    text="Informações do switch não disponíveis",
+                    font=("Segoe UI", 9),
+                    foreground="gray"
+                ).grid(row=0, column=0, columnspan=2, pady=20)
+            except (tk.TclError, AttributeError):
+                pass
             return
         
         row = 0
@@ -1459,18 +1829,50 @@ ForEach-Object {
     
     def _update_ui(self):
         """Atualiza a interface com as informações coletadas"""
+        # Verifica se os frames ainda existem (podem ter sido destruídos se o módulo foi trocado)
+        if not hasattr(self, 'left_frame') or not self.left_frame or not self.left_frame.winfo_exists():
+            return
+        if not hasattr(self, 'right_frame') or not self.right_frame or not self.right_frame.winfo_exists():
+            return
+        if not hasattr(self, 'switch_frame') or not self.switch_frame or not self.switch_frame.winfo_exists():
+            return
+        
         # Remove indicador de carregamento se existir
         if self.loading_label:
-            self.loading_label.destroy()
+            try:
+                if self.loading_label.winfo_exists():
+                    self.loading_label.destroy()
+            except (tk.TclError, AttributeError):
+                pass
             self.loading_label = None
         
         # Limpa frames
-        for widget in self.left_frame.winfo_children():
-            widget.destroy()
-        for widget in self.right_frame.winfo_children():
-            widget.destroy()
-        for widget in self.switch_frame.winfo_children():
-            widget.destroy()
+        try:
+            for widget in self.left_frame.winfo_children():
+                try:
+                    widget.destroy()
+                except (tk.TclError, AttributeError):
+                    pass
+        except (tk.TclError, AttributeError):
+            pass
+        
+        try:
+            for widget in self.right_frame.winfo_children():
+                try:
+                    widget.destroy()
+                except (tk.TclError, AttributeError):
+                    pass
+        except (tk.TclError, AttributeError):
+            pass
+        
+        try:
+            for widget in self.switch_frame.winfo_children():
+                try:
+                    widget.destroy()
+                except (tk.TclError, AttributeError):
+                    pass
+        except (tk.TclError, AttributeError):
+            pass
         
         # Obtém adaptadores ativos
         adapters = self.network_info.get('adapters', [])

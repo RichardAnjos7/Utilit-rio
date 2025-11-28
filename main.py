@@ -9,6 +9,22 @@ import sys
 import os
 import ctypes
 
+# Oculta a janela do console no Windows
+if sys.platform == "win32":
+    try:
+        # Obtém o handle da janela do console
+        kernel32 = ctypes.windll.kernel32
+        user32 = ctypes.windll.user32
+        
+        # Tenta obter o handle da janela do console
+        hwnd = kernel32.GetConsoleWindow()
+        if hwnd:
+            # Esconde a janela do console
+            user32.ShowWindow(hwnd, 0)  # 0 = SW_HIDE
+    except Exception:
+        # Se falhar, continua normalmente (não é crítico)
+        pass
+
 # Adiciona o diretório raiz ao path para importar módulos
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
